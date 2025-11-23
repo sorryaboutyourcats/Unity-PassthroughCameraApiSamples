@@ -34,6 +34,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private List<GameObject> m_boxPool = new();
         private Transform m_displayLocation;
 
+        // Mosaic Effect
+        private RenderTexture m_mosaicTexture;
+        private Material m_mosaicMaterial;
+
         //bounding box data
         public struct BoundingBox
         {
@@ -44,12 +48,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             public string Label;
             public Vector3? WorldPos;
             public string ClassName;
+            public float NormalizedCenterX;
+            public float NormalizedCenterY;
+            public float NormalizedWidth;
+            public float NormalizedHeight;
         }
 
         #region Unity Functions
         private void Start()
         {
             m_displayLocation = m_displayImage.transform;
+        }
+
+        private void OnDestroy()
+        {
+            if (m_mosaicTexture != null)
+            {
+                m_mosaicTexture.Release();
+                m_mosaicTexture = null;
+            }
         }
         #endregion
 
@@ -75,6 +92,31 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         {
             m_displayImage.texture = image;
             m_detectionCanvas.CapturePosition();
+
+            // Update Mosaic Texture
+            if (image != null)
+            {
+                if (m_mosaicTexture == null || m_mosaicTexture.width != image.width || m_mosaicTexture.height != image.height)
+                {
+                    if (m_mosaicTexture != null) m_mosaicTexture.Release();
+                    m_mosaicTexture = new RenderTexture(image.width, image.height, 0);
+                }
+
+                if (m_mosaicMaterial == null)
+                {
+                    var shader = Shader.Find("Custom/Mosaic");
+                    if (shader != null)
+                    {
+                        m_mosaicMaterial = new Material(shader);
+                        m_mosaicMaterial.SetFloat("_MosaicScale", 80.0f); // Adjust scale as needed
+                    }
+                }
+
+                if (m_mosaicMaterial != null)
+                {
+                    Graphics.Blit(image, m_mosaicTexture, m_mosaicMaterial);
+                }
+            }
         }
 
         public void DrawUIBoxes(Tensor<float> output, Tensor<int> labelIDs, float imageWidth, float imageHeight, Pose cameraPose)
@@ -106,6 +148,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 var normalizedCenterY = output[n, 1] / imageHeight;
                 var centerX = displayWidth * (normalizedCenterX - 0.5f);
                 var centerY = displayHeight * (normalizedCenterY - 0.5f);
+                
+                var normalizedWidth = output[n, 2] / imageWidth;
+                var normalizedHeight = output[n, 3] / imageHeight;
 
                 // Get object class name
                 var classname = m_labels[labelIDs[n]].Replace(" ", "_");
@@ -124,6 +169,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     Height = output[n, 3] * (displayHeight / imageHeight),
                     Label = $"Id: {n} Class: {classname} Center (px): {(int)centerX},{(int)centerY} Center (%): {normalizedCenterX:0.00},{normalizedCenterY:0.00}",
                     WorldPos = worldPos,
+                    NormalizedCenterX = normalizedCenterX,
+                    NormalizedCenterY = normalizedCenterY,
+                    NormalizedWidth = normalizedWidth,
+                    NormalizedHeight = normalizedHeight
                 };
 
                 // Add to the list of boxes
@@ -174,6 +223,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var label = panel.GetComponentInChildren<Text>();
             label.text = box.Label;
             label.fontSize = 12;
+
+            // Update Mosaic Layer
+            var mosaicRawImg = panel.GetComponentInChildren<RawImage>();
+            if (mosaicRawImg != null && m_mosaicTexture != null)
+            {
+                mosaicRawImg.texture = m_mosaicTexture;
+                // Calculate UV Rect
+                // Y is inverted in ViewportPointToRay (1-Y), so we assume normalizedCenterY is Top-Down (0=Top).
+                // UVs are Bottom-Up (0=Bottom).
+                // So UV Center Y = 1.0 - normalizedCenterY.
+                
+                float uvCenterX = box.NormalizedCenterX;
+                float uvCenterY = 1.0f - box.NormalizedCenterY;
+                
+                mosaicRawImg.uvRect = new Rect(
+                    uvCenterX - (box.NormalizedWidth / 2),
+                    uvCenterY - (box.NormalizedHeight / 2),
+                    box.NormalizedWidth,
+                    box.NormalizedHeight
+                );
+            }
         }
 
         private GameObject CreateNewBox(Color color)
@@ -187,6 +257,19 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             img.type = Image.Type.Sliced;
             img.fillCenter = false;
             panel.transform.SetParent(m_displayLocation, false);
+
+            // Create Mosaic Layer
+            var mosaicObj = new GameObject("MosaicLayer");
+            mosaicObj.transform.SetParent(panel.transform, false);
+            var mosaicRawImg = mosaicObj.AddComponent<RawImage>();
+            // Stretch to fill parent
+            var mosaicRt = mosaicObj.GetComponent<RectTransform>();
+            mosaicRt.anchorMin = Vector2.zero;
+            mosaicRt.anchorMax = Vector2.one;
+            mosaicRt.offsetMin = Vector2.zero;
+            mosaicRt.offsetMax = Vector2.zero;
+            // Set as first sibling to be behind the border
+            mosaicObj.transform.SetAsFirstSibling();
 
             //Create the label
             var text = new GameObject("ObjectLabel");
